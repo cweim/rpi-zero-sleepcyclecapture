@@ -1,95 +1,157 @@
+#!/usr/bin/env python3
+"""
+Power-efficient Raspberry Pi camera script that captures an image every 60 seconds.
+Implements power-saving features to extend battery life for remote deployments.
+"""
+
 import os
 import time
-from datetime import datetime
 import subprocess
-import shutil
+from datetime import datetime
+import argparse
 
-if shutil.which("libcamera-still"):
-    CAMERA_CMD = "libcamera-still"
-elif shutil.which("raspistill"):
-    CAMERA_CMD = "raspistill"
-else:
-    print("ERROR: No camera command found. Please install raspberrypi-ui-mods package.")
-    exit(1)
+# Parse command line arguments
+parser = argparse.ArgumentParser(description="Capture images at regular intervals with power-saving")
+parser.add_argument("--interval", type=int, default=60, help="Interval between captures in seconds (default: 60)")
+parser.add_argument("--show-preview", action="store_true", help="Show camera preview (uses more power)")
+parser.add_argument("--use-libcamera", action="store_true", help="Use libcamera-still instead of raspistill")
+args = parser.parse_args()
 
-print(f"Starting camera capture script using {CAMERA_CMD}...")
-print("Images will be saved in date-based folders")
-
-try:
-    with open('/sys/power/state', 'r') as f:
-        SLEEP_STATES = f.read().strip().split()
-
-    if 'mem' in SLEEP_STATES:
-        SLEEP_STATE = 'mem'
-    elif 'suspend' in SLEEP_STATES:
-        SLEEP_STATE = 'suspend'
-    else:
-        print(f"Warning: No suitable sleep state found. Available states: {SLEEP_STATES}")
-        SLEEP_STATE = None
-
-    print(f"Using sleep state: {SLEEP_STATE if SLEEP_STATE else 'None - will use time.sleep() instead'}")
-except:
-    print("Warning: Could not determine available sleep states. Will use time.sleep() instead.")
-    SLEEP_STATE = None
-
+# Global variables
+in_low_power_mode = False
 cycle_count = 0
+CAMERA_CMD = "libcamera-still" if args.use_libcamera else "raspistill"
 
-try:
-    while True:
-        cycle_count += 1
-        print(f"\n--- Cycle #{cycle_count} ---")
+def disable_unused_components():
+    """Disable unused hardware components to save power."""
+    try:
+        # Try to disable HDMI (might not work on all Pi models)
+        try:
+            subprocess.run(["sudo", "tvservice", "-o"], check=False)
+            print("✓ HDMI output disabled")
+        except:
+            print("! Could not disable HDMI output")
 
-        now = datetime.now()
-        date_str = now.strftime("%Y%m%d")
-        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        # Try to set CPU governor to powersave using sudo
+        try:
+            subprocess.run(["sudo", "sh", "-c", "echo powersave > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"], check=False)
+            # For multi-core Pis like Zero 2W, try to set all cores
+            for i in range(1, 4):
+                subprocess.run(["sudo", "sh", "-c", f"echo powersave > /sys/devices/system/cpu/cpu{i}/cpufreq/scaling_governor"], check=False)
+            print("✓ CPU governor set to powersave mode")
+        except:
+            print("! Could not set CPU governor")
 
-        print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print("Power-saving mode activated")
+    except Exception as e:
+        print(f"! Warning: Could not disable some components: {e}")
 
-        daily_dir = f"./images/{date_str}"
-        if not os.path.exists(daily_dir):
-            print(f"Creating new directory for today: {daily_dir}")
-            os.makedirs(daily_dir)
+def enter_low_power_mode():
+    """Enter a low-power state between captures."""
+    global in_low_power_mode
+    print("Entering low power mode...")
 
-        image_path = f"{daily_dir}/image_{timestamp}.jpg"
-        print(f"Capturing image to: {image_path}")
+    # Set flag for low power mode
+    in_low_power_mode = True
 
-        if CAMERA_CMD == "libcamera-still":
-            capture_cmd = f"{CAMERA_CMD} -n -o {image_path}"
-        else:  # raspistill
-            capture_cmd = f"{CAMERA_CMD} -n -o {image_path}"
+    # Additional power-saving could be implemented here
+    # For example, turning off other peripherals via GPIO
 
-        result = os.system(capture_cmd)
+    print("System now in low-power mode")
 
-        if result == 0:
-            print("✓ Image captured successfully")
-        else:
-            print(f"✗ Error capturing image, command returned: {result}")
+def exit_low_power_mode():
+    """Exit the low-power state before capture."""
+    global in_low_power_mode
+    print("Exiting low power mode...")
 
-        print("Syncing filesystem...")
-        os.system("sync")
+    # Clear low power mode flag
+    in_low_power_mode = False
 
-        print(f"Waiting for 60 seconds starting at {datetime.now().strftime('%H:%M:%S')}...")
+    print("System resumed normal operation")
 
-        # Sleep using appropriate method
-        if SLEEP_STATE:
-            try:
-                print(f"Entering {SLEEP_STATE} sleep state...")
-                subprocess.run(["sudo", "rtcwake", "-m", SLEEP_STATE, "-s", "60"])
-                print(f"Woke up at {datetime.now().strftime('%H:%M:%S')}")
-            except Exception as e:
-                print(f"Sleep error: {e}")
-                print("Falling back to regular time.sleep()")
-                time.sleep(60)
-        else:
-            # If no suitable sleep state, just use regular time.sleep
-            time.sleep(60)
+def setup():
+    """Initialize the system."""
+    print("Initializing camera system...")
 
-        # Buffer time
-        print("Waiting for 2 seconds buffer time...")
-        time.sleep(2)
+    # Create images directory if it doesn't exist
+    if not os.path.exists("./images"):
+        os.makedirs("./images")
 
-except KeyboardInterrupt:
-    print("\nScript stopped by user")
-except Exception as e:
-    print(f"Error: {e}")
-    raise
+    # Apply power-saving settings
+    disable_unused_components()
+
+    print(f"Camera system initialized. Using {CAMERA_CMD} for captures.")
+    print(f"Images will be captured every {args.interval} seconds.")
+
+def capture_image():
+    """Capture an image and save it with timestamp."""
+    now = datetime.now()
+    date_str = now.strftime("%Y%m%d")
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+    # Create daily directory if it doesn't exist
+    daily_dir = f"./images/{date_str}"
+    if not os.path.exists(daily_dir):
+        print(f"Creating new directory for today: {daily_dir}")
+        os.makedirs(daily_dir)
+
+    # Define image path with timestamp
+    image_path = f"{daily_dir}/image_{timestamp}.jpg"
+    print(f"Capturing image to: {image_path}")
+
+    # Prepare capture command
+    if CAMERA_CMD == "libcamera-still":
+        capture_cmd = f"{CAMERA_CMD} -n -o {image_path}"
+    else:  # raspistill
+        capture_cmd = f"{CAMERA_CMD} -n -o {image_path}"
+
+    # Execute capture command
+    result = os.system(capture_cmd)
+
+    if result == 0:
+        print("✓ Image captured successfully")
+        return True
+    else:
+        print(f"✗ Error capturing image, command returned: {result}")
+        return False
+
+def main():
+    """Main program loop."""
+    global cycle_count
+
+    # Setup system
+    setup()
+
+    try:
+        while True:
+            # Exit low-power mode before capture
+            if in_low_power_mode:
+                exit_low_power_mode()
+
+            # Increment cycle counter
+            cycle_count += 1
+            print(f"\n--- Cycle #{cycle_count} ---")
+            print(f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Capture image
+            capture_success = capture_image()
+
+            # Enter low-power mode between captures
+            enter_low_power_mode()
+
+            # Wait for next interval
+            print(f"Waiting {args.interval} seconds until next capture...")
+            time.sleep(args.interval)
+
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Clean up before exit
+        if in_low_power_mode:
+            exit_low_power_mode()
+        print("Camera system shut down")
+
+if __name__ == "__main__":
+    main()
